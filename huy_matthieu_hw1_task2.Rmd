@@ -1,0 +1,207 @@
+---
+title: "Task 2"
+author: "Matthieu Huy"
+date: "2023-01-30"
+output: html_document
+---
+
+```{r setup, echo = TRUE, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(here)
+library(lubridate)
+library(AICcmodavg)
+library(tidymodels)
+library(cowplot)
+library(equatiomatic)
+```
+
+## Read in data and observe any initial trends
+
+This assignment uses hydrographic and biological data of the California Current System collected by [CalCOFI](https://calcofi.org/ccdata.html) to compare the performance of two competing linear regression models that predict oxygen saturation based on several physical and chemical variables, using AIC and cross validation.
+
+Citation:\
+CalCOFI data are available for use without restriction. Data downloaded from https://calcofi.org/ccdata.html.  Accessed 1/30/2023.
+
+```{r}
+data <- read.csv(here("data/calcofi_seawater_samples.csv"))
+
+p1 <- ggplot(data = data,
+                aes(x = t_deg_c,
+                    y = o2sat)) +
+  geom_point()
+p2 <- ggplot(data = data,
+                aes(x = salinity,
+                    y = o2sat)) +
+  geom_point()
+p3 <- ggplot(data = data,
+                aes(x = po4u_m,
+                    y = o2sat)) +
+  geom_point()
+p4 <- ggplot(data = data,
+                aes(x = depth_m,
+                    y = o2sat)) +
+  geom_point()
+
+plot_grid(p1, p2, p3, p4)
+```
+\
+From initial data observation, water temp and o2sat seem to be positively correlated, while phosphate concentration, salinity, and depth seem to be inversely correlated with o2sat.\
+
+## Create and compare two multiple linear regression models:\
+- Oxygen saturation as a function of water temperature, salinity, and phosphate concentration\
+- Oxygen saturation as a function of water temp, salinity, phosphate concentration, and depth.\
+
+## AIC and BIC comparison
+
+```{r}
+#create formulas for linear regression models
+f1 <- o2sat ~ t_deg_c + salinity + po4u_m 
+f2 <- o2sat ~ t_deg_c + salinity + po4u_m + depth_m
+
+#create linear regression models
+mdl1 <- lm(f1, data = data)
+mdl2 <- lm(f2, data = data)
+summary(mdl1)
+summary(mdl2)
+
+AICcmodavg::aictab(list(mdl1, mdl2)) #Delta AIC 2.42 in favor of model 2
+AICcmodavg::bictab(list(mdl1, mdl2)) #Delta BIC very small, very similar
+```
+#### AIC Comparison:\
+
+Model 2 has a lower AIC (616.60) than model 1 (619.03), despite the penalty for having one more parameter. Delta AIC is 2.42, meaning there is fairly strong positive evidence in favor of model 2.
+
+#### BIC Comparison:\
+
+The BIC for models 1 and 2 are nearly identical, with model 2's (631.33) just slightly lower than model 1's (631.41). Delta BIC is 0.08, meaning there is very weak evidence in favor of model 2. It makes sense that the delta BIC would be smaller than the delta AIC between the two models because BIC places a larger penalty on adding additional parameters when n is large. 
+
+## K-fold cross validation using for-loop
+
+```{r}
+#create function to calculate RMSE
+calc_rmse <- function(x, y) {
+  rmse <- (x - y)^2 %>% mean() %>% sqrt()
+  return(rmse)
+}
+
+rmse_df <- data.frame()
+```
+
+```{r}
+folds <- 10 # no. of folds for 10-fold corss-validation
+folds_vec <- rep(1:folds, length.out = nrow(data)) #create folds vector
+
+set.seed(42) #reproducible results for random sampling
+
+data_folds <- data |>
+  mutate(group = sample(folds_vec, #add column with randomly assigned fold numbers
+                        size = n(), #size of sample 
+                        replace = FALSE)) #sample without replacement
+#table(data_folds$group)
+
+#for-loop method for k-fold cross validation
+for(i in 1:folds) {
+  kfold_test_df <- data_folds |> #create test dataframe
+    filter(group == i)           #by selecting rows that match i = 1, 2, 3... or 10
+  kfold_train_df <- data_folds |>#create training data frame
+    filter(group != i)           #using rows that match other 9/10 folds
+  
+  kfold_lm1 <- lm(f1, data = kfold_train_df) #create model 1 based on training df
+  kfold_lm2 <- lm(f2, data = kfold_train_df) #create model 2 based on training df
+  
+  kfold_pred_df <- kfold_test_df |> #create predictions data frame
+    mutate(mdl1 = predict(kfold_lm1, kfold_test_df), #results from mdl1 predicting on test df
+           mdl2 = predict(kfold_lm2, kfold_test_df)) #results from mdl2 predicting on test df
+  kfold_rmse <- kfold_pred_df |> #create RMSE data frame from o2sat predictions 
+    summarize(rmse_mdl1 = calc_rmse(mdl1, o2sat),
+              rmse_mdl2 = calc_rmse(mdl2, o2sat),
+              test_gp = i)
+  rmse_df <- bind_rows(rmse_df, kfold_rmse) #add results of kfold_rmse to empty rmse df
+}
+
+rmse_df 
+
+rmse_df |>
+  summarize(mean_rmse_mdl1 = mean(rmse_mdl1),
+            mean_rmse_mdl2 = mean(rmse_mdl2))
+
+```
+
+#### 10-fold cross-validation comparison of the two models:\
+
+Model 2 performs better than model 1 based on trying to minimize root-mean-squared-error, with a mean RMSE of 4.8763 compared to 4.9766 for model 1.
+
+## Exploring another potential model
+
+```{r}
+f3 <- o2sat ~ po4u_m + depth_m
+
+mdl3 <- lm(f3, data = data)
+summary(mdl3)
+
+AICcmodavg::aictab(list(mdl1, mdl2, mdl3)) 
+AICcmodavg::bictab(list(mdl1, mdl2, mdl3)) 
+```
+
+Model 3 performs slightly worse than model 2 in the AIC comparison (delta AIC = -1.31), but much better in the BIC comparison (delta BIC = 3.42).
+
+```{r}
+
+rmse_df_mdl3 <- data.frame()
+
+folds <- 10 
+folds_vec <- rep(1:folds, length.out = nrow(data)) 
+
+set.seed(42) 
+
+data_folds <- data |>
+  mutate(group = sample(folds_vec, 
+                        size = n(), 
+                        replace = FALSE)) 
+
+for(i in 1:folds) {
+  kfold_test_df <- data_folds |>
+    filter(group == i)           
+  kfold_train_df <- data_folds |>
+    filter(group != i)           
+  
+  kfold_lm1 <- lm(f1, data = kfold_train_df) 
+  kfold_lm2 <- lm(f2, data = kfold_train_df) 
+  kfold_lm3 <- lm(f3, data = kfold_train_df) #create model 3 based on training df
+  
+  kfold_pred_df <- kfold_test_df |>
+    mutate(mdl1 = predict(kfold_lm1, kfold_test_df), 
+           mdl2 = predict(kfold_lm2, kfold_test_df),
+           mdl3 = predict(kfold_lm3, kfold_test_df)) #results from mdl3 predicting on test df
+  kfold_rmse <- kfold_pred_df |> 
+    summarize(rmse_mdl1 = calc_rmse(mdl1, o2sat),
+              rmse_mdl2 = calc_rmse(mdl2, o2sat),
+              rmse_mdl3 = calc_rmse(mdl3, o2sat),
+              test_gp = i)
+  rmse_df_mdl3 <- bind_rows(rmse_df_mdl3, kfold_rmse)
+}
+
+rmse_df_mdl3 
+
+rmse_df_mdl3 |>
+  summarize(mean_rmse_mdl1 = mean(rmse_mdl1),
+            mean_rmse_mdl2 = mean(rmse_mdl2),
+            mean_rmse_mdl3 = mean(rmse_mdl3))
+```
+
+Model 3 performs  worse than model 2 in the cross validation test, with a mean RMSE of 4.9634 compared to 4.8763, but it performs better than model 1.
+
+## Parameterize final model using the whole data set
+
+AIC and cross validation both indicate model 2 as the best model, so we will use it as our final model.
+
+```{r}
+final_mdl <- lm(f2, data = data)
+summary(final_mdl)
+```
+
+### Final Model:\
+
+`r equatiomatic::extract_eq(final_mdl, wrap = TRUE, terms_per_line = 5, use_coefs = TRUE)`
